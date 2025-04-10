@@ -313,3 +313,81 @@
     )
   )
 )
+
+;; Originator terminates reservation prematurely
+(define-public (terminate-reservation (reservation-identifier uint))
+  (begin
+    (asserts! (verify-reservation-exists? reservation-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (reservation-entry (unwrap! (map-get? ReservationLedger { reservation-identifier: reservation-identifier }) ERROR_RESERVATION_MISSING))
+        (originator (get originator reservation-entry))
+        (quantity (get quantity reservation-entry))
+      )
+      (asserts! (is-eq tx-sender originator) ERROR_UNAUTHORIZED)
+      (asserts! (is-eq (get reservation-status reservation-entry) "pending") ERROR_ALREADY_PROCESSED)
+      (asserts! (<= block-height (get termination-block reservation-entry)) ERROR_RESERVATION_OUTDATED)
+      (match (as-contract (stx-transfer? quantity tx-sender originator))
+        success
+          (begin
+            (map-set ReservationLedger
+              { reservation-identifier: reservation-identifier }
+              (merge reservation-entry { reservation-status: "terminated" })
+            )
+            (print {action: "reservation_terminated", reservation-identifier: reservation-identifier, originator: originator, quantity: quantity})
+            (ok true)
+          )
+        error ERROR_DISPATCH_FAILED
+      )
+    )
+  )
+)
+
+;; Prolong reservation duration
+(define-public (prolong-reservation (reservation-identifier uint) (additional-blocks uint))
+  (begin
+    (asserts! (verify-reservation-exists? reservation-identifier) ERROR_INVALID_IDENTIFIER)
+    (asserts! (> additional-blocks u0) ERROR_INVALID_QUANTITY)
+    (asserts! (<= additional-blocks u1440) ERROR_INVALID_QUANTITY) ;; Max ~10 days extension
+    (let
+      (
+        (reservation-entry (unwrap! (map-get? ReservationLedger { reservation-identifier: reservation-identifier }) ERROR_RESERVATION_MISSING))
+        (originator (get originator reservation-entry)) 
+        (beneficiary (get beneficiary reservation-entry))
+        (present-termination (get termination-block reservation-entry))
+        (updated-termination (+ present-termination additional-blocks))
+      )
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender beneficiary) (is-eq tx-sender PROTOCOL_OVERSEER)) ERROR_UNAUTHORIZED)
+      (asserts! (or (is-eq (get reservation-status reservation-entry) "pending") (is-eq (get reservation-status reservation-entry) "acknowledged")) ERROR_ALREADY_PROCESSED)
+      (map-set ReservationLedger
+        { reservation-identifier: reservation-identifier }
+        (merge reservation-entry { termination-block: updated-termination })
+      )
+      (print {action: "reservation_prolonged", reservation-identifier: reservation-identifier, requestor: tx-sender, new-termination-block: updated-termination})
+      (ok true)
+    )
+  )
+)
+
+;; Initiate reservation disagreement
+(define-public (initiate-disagreement (reservation-identifier uint) (explanation (string-ascii 50)))
+  (begin
+    (asserts! (verify-reservation-exists? reservation-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (reservation-entry (unwrap! (map-get? ReservationLedger { reservation-identifier: reservation-identifier }) ERROR_RESERVATION_MISSING))
+        (originator (get originator reservation-entry))
+        (beneficiary (get beneficiary reservation-entry))
+      )
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender beneficiary)) ERROR_UNAUTHORIZED)
+      (asserts! (or (is-eq (get reservation-status reservation-entry) "pending") (is-eq (get reservation-status reservation-entry) "acknowledged")) ERROR_ALREADY_PROCESSED)
+      (asserts! (<= block-height (get termination-block reservation-entry)) ERROR_RESERVATION_OUTDATED)
+      (map-set ReservationLedger
+        { reservation-identifier: reservation-identifier }
+        (merge reservation-entry { reservation-status: "disputed" })
+      )
+      (print {action: "reservation_disputed", reservation-identifier: reservation-identifier, disputant: tx-sender, explanation: explanation})
+      (ok true)
+    )
+  )
+)
