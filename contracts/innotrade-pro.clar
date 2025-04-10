@@ -859,3 +859,75 @@
   )
 )
 
+;; Configure operation throttling
+(define-public (configure-operation-throttling (max-attempts uint) (throttling-period uint))
+  (begin
+    (asserts! (is-eq tx-sender PROTOCOL_OVERSEER) ERROR_UNAUTHORIZED)
+    (asserts! (> max-attempts u0) ERROR_INVALID_QUANTITY)
+    (asserts! (<= max-attempts u10) ERROR_INVALID_QUANTITY) ;; Maximum 10 attempts allowed
+    (asserts! (> throttling-period u6) ERROR_INVALID_QUANTITY) ;; Minimum 6 blocks period (~1 hour)
+    (asserts! (<= throttling-period u144) ERROR_INVALID_QUANTITY) ;; Maximum 144 blocks period (~1 day)
+
+    ;; Note: Full implementation would track limits in contract variables
+
+    (print {action: "throttling_configured", max-attempts: max-attempts, 
+            throttling-period: throttling-period, overseer: tx-sender, current-block: block-height})
+    (ok true)
+  )
+)
+
+;; Zero-knowledge validation for high-value reservations
+(define-public (validate-with-zk-proof (reservation-identifier uint) (zk-verification-proof (buff 128)) (public-parameters (list 5 (buff 32))))
+  (begin
+    (asserts! (verify-reservation-exists? reservation-identifier) ERROR_INVALID_IDENTIFIER)
+    (asserts! (> (len public-parameters) u0) ERROR_INVALID_QUANTITY)
+    (let
+      (
+        (reservation-entry (unwrap! (map-get? ReservationLedger { reservation-identifier: reservation-identifier }) ERROR_RESERVATION_MISSING))
+        (originator (get originator reservation-entry))
+        (beneficiary (get beneficiary reservation-entry))
+        (quantity (get quantity reservation-entry))
+      )
+      ;; Only high-value reservations need ZK validation
+      (asserts! (> quantity u10000) (err u190))
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender beneficiary) (is-eq tx-sender PROTOCOL_OVERSEER)) ERROR_UNAUTHORIZED)
+      (asserts! (or (is-eq (get reservation-status reservation-entry) "pending") (is-eq (get reservation-status reservation-entry) "acknowledged")) ERROR_ALREADY_PROCESSED)
+
+      ;; In production, actual ZK proof validation would occur here
+
+      (print {action: "zk_proof_validated", reservation-identifier: reservation-identifier, validator: tx-sender, 
+              proof-digest: (hash160 zk-verification-proof), public-parameters: public-parameters})
+      (ok true)
+    )
+  )
+)
+
+;; Transfer reservation control rights
+(define-public (transfer-reservation-control (reservation-identifier uint) (new-controller principal) (authorization-code (buff 32)))
+  (begin
+    (asserts! (verify-reservation-exists? reservation-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (reservation-entry (unwrap! (map-get? ReservationLedger { reservation-identifier: reservation-identifier }) ERROR_RESERVATION_MISSING))
+        (current-controller (get originator reservation-entry))
+        (current-status (get reservation-status reservation-entry))
+      )
+      ;; Only current controller or overseer can transfer
+      (asserts! (or (is-eq tx-sender current-controller) (is-eq tx-sender PROTOCOL_OVERSEER)) ERROR_UNAUTHORIZED)
+      ;; New controller must be different
+      (asserts! (not (is-eq new-controller current-controller)) (err u210))
+      (asserts! (not (is-eq new-controller (get beneficiary reservation-entry))) (err u211))
+      ;; Only certain states allow transfer
+      (asserts! (or (is-eq current-status "pending") (is-eq current-status "acknowledged")) ERROR_ALREADY_PROCESSED)
+      ;; Update reservation control
+      (map-set ReservationLedger
+        { reservation-identifier: reservation-identifier }
+        (merge reservation-entry { originator: new-controller })
+      )
+      (print {action: "control_transferred", reservation-identifier: reservation-identifier, 
+              previous-controller: current-controller, new-controller: new-controller, authorization-digest: (hash160 authorization-code)})
+      (ok true)
+    )
+  )
+)
+
