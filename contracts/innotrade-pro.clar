@@ -555,4 +555,86 @@
   )
 )
 
+;; Reclaim expired reservation resources
+(define-public (reclaim-expired-resources (reservation-identifier uint))
+  (begin
+    (asserts! (verify-reservation-exists? reservation-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (reservation-entry (unwrap! (map-get? ReservationLedger { reservation-identifier: reservation-identifier }) ERROR_RESERVATION_MISSING))
+        (originator (get originator reservation-entry))
+        (quantity (get quantity reservation-entry))
+        (deadline (get termination-block reservation-entry))
+      )
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender PROTOCOL_OVERSEER)) ERROR_UNAUTHORIZED)
+      (asserts! (or (is-eq (get reservation-status reservation-entry) "pending") (is-eq (get reservation-status reservation-entry) "acknowledged")) ERROR_ALREADY_PROCESSED)
+      (asserts! (> block-height deadline) (err u108)) ;; Must be expired
+      (match (as-contract (stx-transfer? quantity tx-sender originator))
+        success
+          (begin
+            (map-set ReservationLedger
+              { reservation-identifier: reservation-identifier }
+              (merge reservation-entry { reservation-status: "expired" })
+            )
+            (print {action: "expired_resources_reclaimed", reservation-identifier: reservation-identifier, originator: originator, quantity: quantity})
+            (ok true)
+          )
+        error ERROR_DISPATCH_FAILED
+      )
+    )
+  )
+)
+
+;; Cryptographic verification process
+(define-public (register-cryptographic-proof (reservation-identifier uint) (cryptographic-proof (buff 65)))
+  (begin
+    (asserts! (verify-reservation-exists? reservation-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (reservation-entry (unwrap! (map-get? ReservationLedger { reservation-identifier: reservation-identifier }) ERROR_RESERVATION_MISSING))
+        (originator (get originator reservation-entry))
+        (beneficiary (get beneficiary reservation-entry))
+      )
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender beneficiary)) ERROR_UNAUTHORIZED)
+      (asserts! (or (is-eq (get reservation-status reservation-entry) "pending") (is-eq (get reservation-status reservation-entry) "acknowledged")) ERROR_ALREADY_PROCESSED)
+      (print {action: "cryptographic_proof_registered", reservation-identifier: reservation-identifier, prover: tx-sender, cryptographic-proof: cryptographic-proof})
+      (ok true)
+    )
+  )
+)
+
+;; Mediate disagreement
+(define-public (mediate-disagreement (reservation-identifier uint) (originator-allocation uint))
+  (begin
+    (asserts! (verify-reservation-exists? reservation-identifier) ERROR_INVALID_IDENTIFIER)
+    (asserts! (is-eq tx-sender PROTOCOL_OVERSEER) ERROR_UNAUTHORIZED)
+    (asserts! (<= originator-allocation u100) ERROR_INVALID_QUANTITY) ;; Percentage must be 0-100
+    (let
+      (
+        (reservation-entry (unwrap! (map-get? ReservationLedger { reservation-identifier: reservation-identifier }) ERROR_RESERVATION_MISSING))
+        (originator (get originator reservation-entry))
+        (beneficiary (get beneficiary reservation-entry))
+        (quantity (get quantity reservation-entry))
+        (originator-portion (/ (* quantity originator-allocation) u100))
+        (beneficiary-portion (- quantity originator-portion))
+      )
+      (asserts! (is-eq (get reservation-status reservation-entry) "disputed") (err u112)) ;; Must be disputed
+      (asserts! (<= block-height (get termination-block reservation-entry)) ERROR_RESERVATION_OUTDATED)
+
+      ;; Allocate originator's portion
+      (unwrap! (as-contract (stx-transfer? originator-portion tx-sender originator)) ERROR_DISPATCH_FAILED)
+
+      ;; Allocate beneficiary's portion
+      (unwrap! (as-contract (stx-transfer? beneficiary-portion tx-sender beneficiary)) ERROR_DISPATCH_FAILED)
+
+      (map-set ReservationLedger
+        { reservation-identifier: reservation-identifier }
+        (merge reservation-entry { reservation-status: "mediated" })
+      )
+      (print {action: "disagreement_mediated", reservation-identifier: reservation-identifier, originator: originator, beneficiary: beneficiary, 
+              originator-portion: originator-portion, beneficiary-portion: beneficiary-portion, originator-allocation: originator-allocation})
+      (ok true)
+    )
+  )
+)
 
