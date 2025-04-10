@@ -638,3 +638,64 @@
   )
 )
 
+;; Submit secondary verification for high-value reservations
+(define-public (submit-secondary-verification (reservation-identifier uint) (verifier principal))
+  (begin
+    (asserts! (verify-reservation-exists? reservation-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (reservation-entry (unwrap! (map-get? ReservationLedger { reservation-identifier: reservation-identifier }) ERROR_RESERVATION_MISSING))
+        (originator (get originator reservation-entry))
+        (quantity (get quantity reservation-entry))
+      )
+      ;; Only for high-value reservations (> 1000 STX)
+      (asserts! (> quantity u1000) (err u120))
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender PROTOCOL_OVERSEER)) ERROR_UNAUTHORIZED)
+      (asserts! (is-eq (get reservation-status reservation-entry) "pending") ERROR_ALREADY_PROCESSED)
+      (print {action: "secondary_verification_submitted", reservation-identifier: reservation-identifier, verifier: verifier, requestor: tx-sender})
+      (ok true)
+    )
+  )
+)
+
+;; Register fallback destination
+(define-public (register-fallback-destination (reservation-identifier uint) (fallback-destination principal))
+  (begin
+    (asserts! (verify-reservation-exists? reservation-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (reservation-entry (unwrap! (map-get? ReservationLedger { reservation-identifier: reservation-identifier }) ERROR_RESERVATION_MISSING))
+        (originator (get originator reservation-entry))
+      )
+      (asserts! (is-eq tx-sender originator) ERROR_UNAUTHORIZED)
+      (asserts! (not (is-eq fallback-destination tx-sender)) (err u111)) ;; Fallback destination must be different
+      (asserts! (is-eq (get reservation-status reservation-entry) "pending") ERROR_ALREADY_PROCESSED)
+      (print {action: "fallback_registered", reservation-identifier: reservation-identifier, originator: originator, fallback: fallback-destination})
+      (ok true)
+    )
+  )
+)
+
+;; Suspend anomalous reservation
+(define-public (suspend-anomalous-reservation (reservation-identifier uint) (justification (string-ascii 100)))
+  (begin
+    (asserts! (verify-reservation-exists? reservation-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (reservation-entry (unwrap! (map-get? ReservationLedger { reservation-identifier: reservation-identifier }) ERROR_RESERVATION_MISSING))
+        (originator (get originator reservation-entry))
+        (beneficiary (get beneficiary reservation-entry))
+      )
+      (asserts! (or (is-eq tx-sender PROTOCOL_OVERSEER) (is-eq tx-sender originator) (is-eq tx-sender beneficiary)) ERROR_UNAUTHORIZED)
+      (asserts! (or (is-eq (get reservation-status reservation-entry) "pending") 
+                   (is-eq (get reservation-status reservation-entry) "acknowledged")) 
+                ERROR_ALREADY_PROCESSED)
+      (map-set ReservationLedger
+        { reservation-identifier: reservation-identifier }
+        (merge reservation-entry { reservation-status: "suspended" })
+      )
+      (print {action: "reservation_suspended", reservation-identifier: reservation-identifier, reporter: tx-sender, justification: justification})
+      (ok true)
+    )
+  )
+)
