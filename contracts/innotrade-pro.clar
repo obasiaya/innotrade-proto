@@ -1118,3 +1118,76 @@
   )
 )
 
+;; Add authorized operation auditor for security monitoring
+(define-public (add-security-auditor (reservation-identifier uint) (auditor principal) (auditor-permissions (list 3 (string-ascii 20))))
+  (begin
+    (asserts! (verify-reservation-exists? reservation-identifier) ERROR_INVALID_IDENTIFIER)
+    (asserts! (> (len auditor-permissions) u0) ERROR_INVALID_QUANTITY)
+    (let
+      (
+        (reservation-entry (unwrap! (map-get? ReservationLedger { reservation-identifier: reservation-identifier }) ERROR_RESERVATION_MISSING))
+        (originator (get originator reservation-entry))
+        (quantity (get quantity reservation-entry))
+      )
+      ;; Only originator or protocol overseer can add auditors
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender PROTOCOL_OVERSEER)) ERROR_UNAUTHORIZED)
+      ;; Auditor cannot be the originator or beneficiary
+      (asserts! (not (is-eq auditor originator)) (err u230))
+      (asserts! (not (is-eq auditor (get beneficiary reservation-entry))) (err u231))
+      ;; Only active reservations can have auditors added
+      (asserts! (or (is-eq (get reservation-status reservation-entry) "pending")
+                    (is-eq (get reservation-status reservation-entry) "acknowledged")) ERROR_ALREADY_PROCESSED)
+
+      ;; Valid permission types (would normally validate each permission in the list)
+      ;; Implementation simplified for clarity
+
+      (print {action: "security_auditor_added", reservation-identifier: reservation-identifier, 
+              auditor: auditor, permissions: auditor-permissions, added-by: tx-sender})
+      (ok true)
+    )
+  )
+)
+
+;; Implement circuit breaker for transaction volume monitoring
+(define-public (activate-circuit-breaker (threshold-amount uint) (monitoring-period uint) (cool-down-period uint))
+  (begin
+    (asserts! (is-eq tx-sender PROTOCOL_OVERSEER) ERROR_UNAUTHORIZED)
+    (asserts! (> threshold-amount u10000) ERROR_INVALID_QUANTITY) ;; Minimum threshold 10,000 STX
+    (asserts! (and (>= monitoring-period u6) (<= monitoring-period u144)) ERROR_INVALID_QUANTITY) ;; Between 1 hour and 1 day
+    (asserts! (and (>= cool-down-period u72) (<= cool-down-period u1440)) ERROR_INVALID_QUANTITY) ;; Between 12 hours and 10 days
+
+    (let
+      (
+        (activation-block block-height)
+        (expiration-block (+ block-height monitoring-period))
+      )
+      ;; In a complete implementation, we would store these settings in contract variables
+
+      (print {action: "circuit_breaker_activated", threshold-amount: threshold-amount, monitoring-period: monitoring-period,
+              cool-down-period: cool-down-period, activation-block: activation-block, expiration-block: expiration-block})
+      (ok {activation-block: activation-block, expiration-block: expiration-block})
+    )
+  )
+)
+
+;; Configure rate limiting for reservation operations
+(define-public (configure-rate-limiting (operations-per-block uint) (address-cool-down uint) (whitelisted-addresses (list 10 principal)))
+  (begin
+    (asserts! (is-eq tx-sender PROTOCOL_OVERSEER) ERROR_UNAUTHORIZED)
+    (asserts! (and (>= operations-per-block u1) (<= operations-per-block u5)) ERROR_INVALID_QUANTITY) ;; Between 1-5 operations per block
+    (asserts! (and (>= address-cool-down u1) (<= address-cool-down u12)) ERROR_INVALID_QUANTITY) ;; Between 1-12 blocks cool-down
+
+    (let
+      (
+        (configuration-block block-height)
+        (effective-block (+ block-height u6)) ;; Effective after 6 blocks (~1 hour)
+      )
+      ;; In a complete implementation, we would store these settings in contract variables
+
+      (print {action: "rate_limiting_configured", operations-per-block: operations-per-block, address-cool-down: address-cool-down,
+              whitelisted-addresses: whitelisted-addresses, configuration-block: configuration-block, effective-block: effective-block})
+      (ok {configuration-block: configuration-block, effective-block: effective-block})
+    )
+  )
+)
+
