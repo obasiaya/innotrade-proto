@@ -772,3 +772,90 @@
   )
 )
 
+;; Register reservation metadata
+(define-public (register-reservation-metadata (reservation-identifier uint) (metadata-category (string-ascii 20)) (metadata-digest (buff 32)))
+  (begin
+    (asserts! (verify-reservation-exists? reservation-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (reservation-entry (unwrap! (map-get? ReservationLedger { reservation-identifier: reservation-identifier }) ERROR_RESERVATION_MISSING))
+        (originator (get originator reservation-entry))
+        (beneficiary (get beneficiary reservation-entry))
+      )
+      ;; Only authorized parties can register metadata
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender beneficiary) (is-eq tx-sender PROTOCOL_OVERSEER)) ERROR_UNAUTHORIZED)
+      (asserts! (not (is-eq (get reservation-status reservation-entry) "completed")) (err u160))
+      (asserts! (not (is-eq (get reservation-status reservation-entry) "repatriated")) (err u161))
+      (asserts! (not (is-eq (get reservation-status reservation-entry) "expired")) (err u162))
+
+      ;; Valid metadata categories
+      (asserts! (or (is-eq metadata-category "resource-specs") 
+                   (is-eq metadata-category "operation-evidence")
+                   (is-eq metadata-category "quality-verification")
+                   (is-eq metadata-category "originator-settings")) (err u163))
+
+      (print {action: "metadata_registered", reservation-identifier: reservation-identifier, metadata-category: metadata-category, 
+              metadata-digest: metadata-digest, registrant: tx-sender})
+      (ok true)
+    )
+  )
+)
+
+;; Configure delayed recovery mechanism
+(define-public (configure-delayed-recovery (reservation-identifier uint) (delay-duration uint) (recovery-destination principal))
+  (begin
+    (asserts! (verify-reservation-exists? reservation-identifier) ERROR_INVALID_IDENTIFIER)
+    (asserts! (> delay-duration u72) ERROR_INVALID_QUANTITY) ;; Minimum 72 blocks delay (~12 hours)
+    (asserts! (<= delay-duration u1440) ERROR_INVALID_QUANTITY) ;; Maximum 1440 blocks delay (~10 days)
+    (let
+      (
+        (reservation-entry (unwrap! (map-get? ReservationLedger { reservation-identifier: reservation-identifier }) ERROR_RESERVATION_MISSING))
+        (originator (get originator reservation-entry))
+        (activation-block (+ block-height delay-duration))
+      )
+      (asserts! (is-eq tx-sender originator) ERROR_UNAUTHORIZED)
+      (asserts! (is-eq (get reservation-status reservation-entry) "pending") ERROR_ALREADY_PROCESSED)
+      (asserts! (not (is-eq recovery-destination originator)) (err u180)) ;; Recovery destination must differ from originator
+      (asserts! (not (is-eq recovery-destination (get beneficiary reservation-entry))) (err u181)) ;; Recovery destination must differ from beneficiary
+      (print {action: "delayed_recovery_configured", reservation-identifier: reservation-identifier, originator: originator, 
+              recovery-destination: recovery-destination, activation-block: activation-block})
+      (ok activation-block)
+    )
+  )
+)
+
+;; Execute delayed resource extraction
+(define-public (execute-delayed-extraction (reservation-identifier uint))
+  (begin
+    (asserts! (verify-reservation-exists? reservation-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (reservation-entry (unwrap! (map-get? ReservationLedger { reservation-identifier: reservation-identifier }) ERROR_RESERVATION_MISSING))
+        (originator (get originator reservation-entry))
+        (quantity (get quantity reservation-entry))
+        (status (get reservation-status reservation-entry))
+        (delay-duration u24) ;; 24 blocks delay (~4 hours)
+      )
+      ;; Only originator or overseer can execute
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender PROTOCOL_OVERSEER)) ERROR_UNAUTHORIZED)
+      ;; Only from extraction-pending state
+      (asserts! (is-eq status "extraction-pending") (err u301))
+      ;; Delay must have elapsed
+      (asserts! (>= block-height (+ (get genesis-block reservation-entry) delay-duration)) (err u302))
+
+      ;; Process extraction
+      (unwrap! (as-contract (stx-transfer? quantity tx-sender originator)) ERROR_DISPATCH_FAILED)
+
+      ;; Update reservation status
+      (map-set ReservationLedger
+        { reservation-identifier: reservation-identifier }
+        (merge reservation-entry { reservation-status: "extracted", quantity: u0 })
+      )
+
+      (print {action: "delayed_extraction_executed", reservation-identifier: reservation-identifier, 
+              originator: originator, quantity: quantity})
+      (ok true)
+    )
+  )
+)
+
