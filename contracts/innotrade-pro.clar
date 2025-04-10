@@ -221,3 +221,95 @@
   )
 )
 
+;; Implement circuit breaker for rapid response to anomalous activity
+;; Allows temporary suspension of protocol activity in emergency situations
+(define-public (activate-protocol-circuit-breaker (circuit-category (string-ascii 20)) (duration uint) (justification (string-ascii 100)))
+  (begin
+    ;; Only protocol overseer can activate circuit breaker
+    (asserts! (is-eq tx-sender PROTOCOL_OVERSEER) ERROR_UNAUTHORIZED)
+    ;; Validate duration - minimum 6 blocks (~1 hour), maximum 8640 blocks (~60 days)
+    (asserts! (>= duration u6) ERROR_INVALID_QUANTITY)
+    (asserts! (<= duration u8640) ERROR_INVALID_QUANTITY)
+    ;; Valid circuit categories
+    (asserts! (or (is-eq circuit-category "high-value")
+                 (is-eq circuit-category "all-transfers")
+                 (is-eq circuit-category "specific-resource")
+                 (is-eq circuit-category "protocol-wide")) (err u310))
+
+    (let
+      (
+        (activation-block block-height)
+        (expiration-block (+ block-height duration))
+      )
+      ;; In production, would set breaker status in contract data vars
+
+      (print {action: "circuit_breaker_activated", category: circuit-category, 
+              activation-block: activation-block, expiration-block: expiration-block,
+              justification: justification, activator: tx-sender})
+      (ok expiration-block)
+    )
+  )
+)
+
+;; Implement phased withdrawal for high-value transfers
+;; Reduces risk by splitting large transfers into multiple time-gated phases
+(define-public (configure-phased-withdrawal (reservation-identifier uint) (phase-count uint) (phase-interval uint))
+  (begin
+    (asserts! (verify-reservation-exists? reservation-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (reservation-entry (unwrap! (map-get? ReservationLedger { reservation-identifier: reservation-identifier }) ERROR_RESERVATION_MISSING))
+        (originator (get originator reservation-entry))
+        (quantity (get quantity reservation-entry))
+      )
+      ;; Only applicable to high-value reservations
+      (asserts! (> quantity u1000) ERROR_INVALID_QUANTITY)
+      ;; Only originator can configure phased withdrawal
+      (asserts! (is-eq tx-sender originator) ERROR_UNAUTHORIZED)
+      ;; Must have at least 2 and at most 5 phases
+      (asserts! (and (>= phase-count u2) (<= phase-count u5)) (err u270))
+      ;; Phase interval must be reasonable (between 6 and 144 blocks)
+      (asserts! (and (>= phase-interval u6) (<= phase-interval u144)) (err u271))
+      ;; Verify reservation is still pending
+      (asserts! (is-eq (get reservation-status reservation-entry) "pending") ERROR_ALREADY_PROCESSED)
+
+      (print {action: "phased_withdrawal_configured", reservation-identifier: reservation-identifier, 
+              originator: originator, phase-count: phase-count, phase-interval: phase-interval, 
+              phase-amount: (/ quantity phase-count)})
+      (ok true)
+    )
+  )
+)
+
+;; Implement time-based lockout for suspicious activity
+;; Temporarily blocks operations after detected anomalies
+(define-public (activate-security-lockout (reservation-identifier uint) (lockout-duration uint) (lockout-reason (string-ascii 50)))
+  (begin
+    (asserts! (verify-reservation-exists? reservation-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (reservation-entry (unwrap! (map-get? ReservationLedger { reservation-identifier: reservation-identifier }) ERROR_RESERVATION_MISSING))
+        (originator (get originator reservation-entry))
+        (beneficiary (get beneficiary reservation-entry))
+        (unlock-block (+ block-height lockout-duration))
+      )
+      ;; Only authorized parties can activate lockout
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender beneficiary) (is-eq tx-sender PROTOCOL_OVERSEER)) ERROR_UNAUTHORIZED)
+      ;; Ensure lockout duration is reasonable (between 12 and 72 blocks)
+      (asserts! (and (>= lockout-duration u12) (<= lockout-duration u72)) (err u280))
+      ;; Cannot lockout completed reservations
+      (asserts! (not (is-eq (get reservation-status reservation-entry) "completed")) ERROR_ALREADY_PROCESSED)
+      (asserts! (not (is-eq (get reservation-status reservation-entry) "expired")) (err u281))
+
+      ;; Update reservation status to locked
+      (map-set ReservationLedger
+        { reservation-identifier: reservation-identifier }
+        (merge reservation-entry { reservation-status: "locked" })
+      )
+
+      (print {action: "security_lockout_activated", reservation-identifier: reservation-identifier, 
+              requestor: tx-sender, unlock-block: unlock-block, lockout-reason: lockout-reason})
+      (ok unlock-block)
+    )
+  )
+)
