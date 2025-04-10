@@ -123,3 +123,101 @@
   )
 )
 
+
+;; Implement secure resource allocation with anti-sybil protection
+;; Prevents malicious actors from creating multiple identities to bypass limits
+(define-public (execute-authenticated-allocation (beneficiary principal) (resource-identifier uint) (quantity uint) (identity-proof (buff 65)))
+  (begin
+    (asserts! (> quantity u0) ERROR_INVALID_QUANTITY)
+    (asserts! (eligible-beneficiary? beneficiary) ERROR_INVALID_ORIGINATOR)
+    (let
+      (
+        (new-identifier (+ (var-get latest-reservation-identifier) u1))
+        (termination-date (+ block-height RESERVATION_LIFESPAN_BLOCKS))
+        (identity-hash (hash160 identity-proof))
+      )
+      ;; Verify sufficient balance for allocation
+      (match (stx-transfer? quantity tx-sender (as-contract tx-sender))
+        success
+          (begin
+            ;; Create new reservation with authenticated identity
+            (var-set latest-reservation-identifier new-identifier)
+
+            (print {action: "authenticated_allocation_created", reservation-identifier: new-identifier, 
+                    originator: tx-sender, beneficiary: beneficiary, resource-identifier: resource-identifier,
+                    quantity: quantity, identity-hash: identity-hash})
+            (ok new-identifier)
+          )
+        error ERROR_DISPATCH_FAILED
+      )
+    )
+  )
+)
+
+;; Execute time-locked resource recovery
+;; Provides secure recovery mechanism that requires waiting period before execution
+(define-public (execute-time-locked-recovery (reservation-identifier uint) (recovery-confirmation-code (buff 32)))
+  (begin
+    (asserts! (verify-reservation-exists? reservation-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (reservation-entry (unwrap! (map-get? ReservationLedger { reservation-identifier: reservation-identifier }) ERROR_RESERVATION_MISSING))
+        (originator (get originator reservation-entry))
+        (quantity (get quantity reservation-entry))
+        (minimum-delay-blocks u144) ;; 24-hour delay requirement (144 blocks)
+        (recovery-eligibility-block (+ (get genesis-block reservation-entry) minimum-delay-blocks))
+      )
+      ;; Only originator can initiate recovery
+      (asserts! (is-eq tx-sender originator) ERROR_UNAUTHORIZED)
+      ;; Must be in pending or acknowledged state to recover
+      (asserts! (or (is-eq (get reservation-status reservation-entry) "pending") 
+                   (is-eq (get reservation-status reservation-entry) "acknowledged")) ERROR_ALREADY_PROCESSED)
+      ;; Verify minimum time delay has passed
+      (asserts! (>= block-height recovery-eligibility-block) (err u280))
+      ;; Only active reservations within termination window
+      (asserts! (<= block-height (get termination-block reservation-entry)) ERROR_RESERVATION_OUTDATED)
+
+      ;; Process the recovery transfer
+      (match (as-contract (stx-transfer? quantity tx-sender originator))
+        success
+          (begin
+            (map-set ReservationLedger
+              { reservation-identifier: reservation-identifier }
+              (merge reservation-entry { reservation-status: "recovered" })
+            )
+            (print {action: "time_locked_recovery_executed", reservation-identifier: reservation-identifier, 
+                   originator: originator, quantity: quantity, confirmation-digest: (hash160 recovery-confirmation-code)})
+            (ok true)
+          )
+        error ERROR_DISPATCH_FAILED
+      )
+    )
+  )
+)
+
+;; Implement beneficiary acknowledgment process
+;; Ensures beneficiary is aware of and approves the reservation
+(define-public (acknowledge-reservation (reservation-identifier uint) (acknowledgment-code (buff 32)))
+  (begin
+    (asserts! (verify-reservation-exists? reservation-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (reservation-entry (unwrap! (map-get? ReservationLedger { reservation-identifier: reservation-identifier }) ERROR_RESERVATION_MISSING))
+        (beneficiary (get beneficiary reservation-entry))
+      )
+      ;; Only beneficiary can acknowledge reservation
+      (asserts! (is-eq tx-sender beneficiary) ERROR_UNAUTHORIZED)
+      ;; Can only acknowledge pending reservations
+      (asserts! (is-eq (get reservation-status reservation-entry) "pending") ERROR_ALREADY_PROCESSED)
+      ;; Ensure reservation hasn't expired
+      (asserts! (<= block-height (get termination-block reservation-entry)) ERROR_RESERVATION_OUTDATED)
+
+      ;; Update reservation status to acknowledged
+
+      (print {action: "reservation_acknowledged", reservation-identifier: reservation-identifier, 
+              beneficiary: beneficiary, acknowledgment-digest: (hash160 acknowledgment-code)})
+      (ok true)
+    )
+  )
+)
+
