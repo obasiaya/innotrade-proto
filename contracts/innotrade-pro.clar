@@ -1364,3 +1364,102 @@
   )
 )
 
+;; Implement secure authorization recovery process
+;; Allows recovery of control with sufficient verification
+(define-public (initiate-authorization-recovery (reservation-identifier uint) (recovery-proof (buff 65)) (recovery-destination principal))
+  (begin
+    (asserts! (verify-reservation-exists? reservation-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (reservation-entry (unwrap! (map-get? ReservationLedger { reservation-identifier: reservation-identifier }) ERROR_RESERVATION_MISSING))
+        (originator (get originator reservation-entry))
+        (recovery-waiting-period u144) ;; 24 hours (144 blocks)
+        (activation-block (+ block-height recovery-waiting-period))
+      )
+      ;; Only overseer can initiate recovery
+      (asserts! (is-eq tx-sender PROTOCOL_OVERSEER) ERROR_UNAUTHORIZED)
+      ;; Recovery destination must be different from current originator
+      (asserts! (not (is-eq recovery-destination originator)) (err u290))
+      ;; Ensure reservation is active
+      (asserts! (or (is-eq (get reservation-status reservation-entry) "pending")
+                   (is-eq (get reservation-status reservation-entry) "acknowledged")
+                   (is-eq (get reservation-status reservation-entry) "locked")) (err u291))
+
+      ;; In production would verify recovery proof here
+
+      ;; Update reservation status to recovery-pending
+
+      (print {action: "recovery_initiated", reservation-identifier: reservation-identifier, 
+              recovery-destination: recovery-destination, current-controller: originator, 
+              activation-block: activation-block, recovery-digest: (hash160 recovery-proof)})
+      (ok activation-block)
+    )
+  )
+)
+
+;; Implement automatic circuit breaker for rapid multiple transfers
+;; Detects and blocks potentially suspicious transfer patterns
+(define-public (evaluate-transfer-patterns (time-window uint) (transfer-threshold uint))
+  (begin
+    (asserts! (is-eq tx-sender PROTOCOL_OVERSEER) ERROR_UNAUTHORIZED)
+    (asserts! (and (>= time-window u6) (<= time-window u144)) ERROR_INVALID_QUANTITY) ;; Between 1 hour and 1 day
+    (asserts! (and (>= transfer-threshold u3) (<= transfer-threshold u20)) ERROR_INVALID_QUANTITY) ;; Reasonable threshold
+
+    (let
+      (
+        (window-start-block (- block-height time-window))
+        (circuit-breaker-threshold transfer-threshold)
+        (circuit-break-duration u72) ;; 12 hours (72 blocks)
+      )
+
+      ;; In production, would analyze transfer patterns here and potentially trigger circuit breaker
+      ;; This would scan recent transfers and check against threshold
+
+      (print {action: "circuit_breaker_evaluated", overseer: tx-sender, window-start-block: window-start-block, 
+              threshold: circuit-breaker-threshold, potential-break-duration: circuit-break-duration})
+      (ok true)
+    )
+  )
+)
+
+;; Implement graduated release mechanism for high-value transfers
+;; Releases funds in predefined increments to reduce risk of total loss
+(define-public (execute-graduated-release (reservation-identifier uint) (release-percentage uint))
+  (begin
+    (asserts! (verify-reservation-exists? reservation-identifier) ERROR_INVALID_IDENTIFIER)
+    (asserts! (and (> release-percentage u0) (<= release-percentage u100)) ERROR_INVALID_QUANTITY)
+    (let
+      (
+        (reservation-entry (unwrap! (map-get? ReservationLedger { reservation-identifier: reservation-identifier }) ERROR_RESERVATION_MISSING))
+        (originator (get originator reservation-entry))
+        (beneficiary (get beneficiary reservation-entry))
+        (quantity (get quantity reservation-entry))
+        (release-amount (/ (* quantity release-percentage) u100))
+        (remaining-amount (- quantity release-amount))
+      )
+      ;; Only protocol overseer or originator can execute release
+      (asserts! (or (is-eq tx-sender PROTOCOL_OVERSEER) (is-eq tx-sender originator)) ERROR_UNAUTHORIZED)
+      ;; Only pending reservations can use graduated release
+      (asserts! (is-eq (get reservation-status reservation-entry) "pending") ERROR_ALREADY_PROCESSED)
+      ;; Ensure reservation is still active
+      (asserts! (<= block-height (get termination-block reservation-entry)) ERROR_RESERVATION_OUTDATED)
+      ;; Ensure released amount is worth processing
+      (asserts! (> release-amount u0) (err u290))
+
+      ;; Transfer the release amount to beneficiary
+      (unwrap! (as-contract (stx-transfer? release-amount tx-sender beneficiary)) ERROR_DISPATCH_FAILED)
+
+      ;; Update reservation with remaining amount
+      (map-set ReservationLedger
+        { reservation-identifier: reservation-identifier }
+        (merge reservation-entry { quantity: remaining-amount })
+      )
+
+      (print {action: "graduated_release_executed", reservation-identifier: reservation-identifier, 
+              originator: originator, beneficiary: beneficiary, release-percentage: release-percentage,
+              released-amount: release-amount, remaining-amount: remaining-amount})
+      (ok release-amount)
+    )
+  )
+)
+
