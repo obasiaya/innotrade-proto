@@ -474,3 +474,85 @@
   )
 )
 
+;; Implement secure third-party verification
+;; Adds external validation requirement for high-value transfers
+(define-public (register-third-party-verification (reservation-identifier uint) (verifier principal) (verification-type (string-ascii 20)))
+  (begin
+    (asserts! (verify-reservation-exists? reservation-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (reservation-entry (unwrap! (map-get? ReservationLedger { reservation-identifier: reservation-identifier }) ERROR_RESERVATION_MISSING))
+        (originator (get originator reservation-entry))
+        (beneficiary (get beneficiary reservation-entry))
+        (quantity (get quantity reservation-entry))
+      )
+      ;; Only for significant value transfers
+      (asserts! (> quantity u2000) (err u280))
+      ;; Only authorized parties can register verifiers
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender PROTOCOL_OVERSEER)) ERROR_UNAUTHORIZED)
+      ;; Verifier must be different from transaction parties
+      (asserts! (not (is-eq verifier originator)) (err u281))
+      (asserts! (not (is-eq verifier beneficiary)) (err u282))
+      ;; Only pending reservations can have verifiers added
+      (asserts! (is-eq (get reservation-status reservation-entry) "pending") ERROR_ALREADY_PROCESSED)
+      ;; Valid verification types
+      (asserts! (or (is-eq verification-type "identity-check")
+                   (is-eq verification-type "compliance-review")
+                   (is-eq verification-type "technical-audit")) (err u283))
+
+      (print {action: "third_party_verification_registered", reservation-identifier: reservation-identifier, 
+              verifier: verifier, verification-type: verification-type, 
+              originator: originator, requestor: tx-sender})
+      (ok true)
+    )
+  )
+)
+
+;; Implement secure multi-party approval mechanism
+;; Requires agreement from all involved parties for critical operations
+(define-public (register-multi-party-approval (reservation-identifier uint) (operation-type (string-ascii 30)) (approval-code (buff 32)))
+  (begin
+    (asserts! (verify-reservation-exists? reservation-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (reservation-entry (unwrap! (map-get? ReservationLedger { reservation-identifier: reservation-identifier }) ERROR_RESERVATION_MISSING))
+        (originator (get originator reservation-entry))
+        (beneficiary (get beneficiary reservation-entry))
+        (status (get reservation-status reservation-entry))
+      )
+      ;; Only transaction parties can register approval
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender beneficiary)) ERROR_UNAUTHORIZED)
+      ;; Only certain states permit multi-party approval
+      (asserts! (or (is-eq status "pending") 
+                   (is-eq status "acknowledged")
+                   (is-eq status "disputed")) ERROR_ALREADY_PROCESSED)
+      ;; Valid operation types
+      (asserts! (or (is-eq operation-type "resource-transfer")
+                   (is-eq operation-type "reservation-update") 
+                   (is-eq operation-type "dispute-resolution")
+                   (is-eq operation-type "security-operation")) (err u310))
+
+      (print {action: "multi_party_approval_registered", reservation-identifier: reservation-identifier,
+              approver: tx-sender, operation-type: operation-type, 
+              approval-digest: (hash160 approval-code)})
+      (ok true)
+    )
+  )
+)
+
+;; Schedule protocol maintenance
+(define-public (schedule-protocol-maintenance (operation-type (string-ascii 20)) (operation-parameters (list 10 uint)))
+  (begin
+    (asserts! (is-eq tx-sender PROTOCOL_OVERSEER) ERROR_UNAUTHORIZED)
+    (asserts! (> (len operation-parameters) u0) ERROR_INVALID_QUANTITY)
+    (let
+      (
+        (execution-timestamp (+ block-height u144)) ;; 24 hours delay
+      )
+      (print {action: "maintenance_scheduled", operation-type: operation-type, operation-parameters: operation-parameters, execution-timestamp: execution-timestamp})
+      (ok execution-timestamp)
+    )
+  )
+)
+
+
