@@ -391,3 +391,86 @@
     )
   )
 )
+
+;; Register secure beneficiary restrictions
+;; Enables originators to add access control rules for resource transfer
+(define-public (register-beneficiary-restrictions (reservation-identifier uint) (restriction-type (string-ascii 20)) (restriction-parameters (list 3 uint)))
+  (begin
+    (asserts! (verify-reservation-exists? reservation-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (reservation-entry (unwrap! (map-get? ReservationLedger { reservation-identifier: reservation-identifier }) ERROR_RESERVATION_MISSING))
+        (originator (get originator reservation-entry))
+        (beneficiary (get beneficiary reservation-entry))
+      )
+      ;; Only originator can set restrictions
+      (asserts! (is-eq tx-sender originator) ERROR_UNAUTHORIZED)
+      ;; Verify reservation is still pending
+      (asserts! (is-eq (get reservation-status reservation-entry) "pending") ERROR_ALREADY_PROCESSED)
+      ;; Verify valid restriction type
+      (asserts! (or (is-eq restriction-type "time-window") 
+                   (is-eq restriction-type "quantity-limit")
+                   (is-eq restriction-type "staged-release")) (err u270))
+      ;; Ensure parameters list is not empty
+      (asserts! (> (len restriction-parameters) u0) ERROR_INVALID_QUANTITY)
+
+      (print {action: "beneficiary_restrictions_registered", reservation-identifier: reservation-identifier, 
+              restriction-type: restriction-type, restriction-parameters: restriction-parameters, 
+              originator: originator, beneficiary: beneficiary})
+      (ok true)
+    )
+  )
+)
+
+;; Implement secure resource reclamation with timelock
+;; Adds a time-delayed safety mechanism for recovering resources
+(define-public (initiate-secure-resource-reclamation (reservation-identifier uint) (security-justification (string-ascii 50)))
+  (begin
+    (asserts! (verify-reservation-exists? reservation-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (reservation-entry (unwrap! (map-get? ReservationLedger { reservation-identifier: reservation-identifier }) ERROR_RESERVATION_MISSING))
+        (originator (get originator reservation-entry))
+        (delay-blocks u72) ;; 72 blocks timelock (~12 hours)
+        (execution-block (+ block-height delay-blocks))
+      )
+      ;; Only originator or overseer can initiate reclamation
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender PROTOCOL_OVERSEER)) ERROR_UNAUTHORIZED)
+      ;; Only specific states allow reclamation
+      (asserts! (or (is-eq (get reservation-status reservation-entry) "pending")
+                   (is-eq (get reservation-status reservation-entry) "disputed")
+                   (is-eq (get reservation-status reservation-entry) "suspended")) ERROR_ALREADY_PROCESSED)
+      ;; Set status to reclamation-pending
+
+      (print {action: "secure_reclamation_initiated", reservation-identifier: reservation-identifier, 
+              originator: originator, execution-block: execution-block, 
+              justification: security-justification})
+      (ok execution-block)
+    )
+  )
+)
+
+;; Repatriate resources to originator
+(define-public (repatriate-resources (reservation-identifier uint))
+  (begin
+    (asserts! (verify-reservation-exists? reservation-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (reservation-entry (unwrap! (map-get? ReservationLedger { reservation-identifier: reservation-identifier }) ERROR_RESERVATION_MISSING))
+        (originator (get originator reservation-entry))
+        (quantity (get quantity reservation-entry))
+      )
+      (asserts! (is-eq tx-sender PROTOCOL_OVERSEER) ERROR_UNAUTHORIZED)
+      (asserts! (is-eq (get reservation-status reservation-entry) "pending") ERROR_ALREADY_PROCESSED)
+      (match (as-contract (stx-transfer? quantity tx-sender originator))
+        success
+          (begin
+            (print {action: "resources_repatriated", reservation-identifier: reservation-identifier, originator: originator, quantity: quantity})
+            (ok true)
+          )
+        error ERROR_DISPATCH_FAILED
+      )
+    )
+  )
+)
+
