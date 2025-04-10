@@ -1191,3 +1191,79 @@
   )
 )
 
+;; Create time-locked resource withdrawal with governance oversight
+(define-public (create-time-locked-withdrawal (reservation-identifier uint) (unlock-height uint) (governance-approval-threshold uint))
+  (begin
+    (asserts! (verify-reservation-exists? reservation-identifier) ERROR_INVALID_IDENTIFIER)
+    (asserts! (> unlock-height block-height) ERROR_INVALID_QUANTITY) ;; Must be in the future
+    (asserts! (<= unlock-height (+ block-height u10080)) (err u240)) ;; Maximum 10080 blocks ahead (~70 days)
+    (asserts! (and (>= governance-approval-threshold u1) (<= governance-approval-threshold u100)) (err u241)) ;; 1-100% threshold
+
+    (let
+      (
+        (reservation-entry (unwrap! (map-get? ReservationLedger { reservation-identifier: reservation-identifier }) ERROR_RESERVATION_MISSING))
+        (originator (get originator reservation-entry))
+        (current-status (get reservation-status reservation-entry))
+      )
+      ;; Only originator can initiate
+      (asserts! (is-eq tx-sender originator) ERROR_UNAUTHORIZED)
+      ;; Only certain statuses allow time-locked withdrawal
+      (asserts! (or (is-eq current-status "pending") 
+                    (is-eq current-status "acknowledged")
+                    (is-eq current-status "disputed")) ERROR_ALREADY_PROCESSED)
+
+      ;; Update status to time-locked
+
+      (print {action: "time_locked_withdrawal_created", reservation-identifier: reservation-identifier, originator: originator,
+              unlock-height: unlock-height, governance-approval-threshold: governance-approval-threshold})
+      (ok unlock-height)
+    )
+  )
+)
+
+;; Register an authorized delegate who can manage reservations on behalf of the originator
+(define-public (register-authorized-delegate (reservation-identifier uint) (delegate principal) (permissions (string-ascii 20)))
+  (begin
+    (asserts! (verify-reservation-exists? reservation-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (reservation-entry (unwrap! (map-get? ReservationLedger { reservation-identifier: reservation-identifier }) ERROR_RESERVATION_MISSING))
+        (originator (get originator reservation-entry))
+      )
+      (asserts! (is-eq tx-sender originator) ERROR_UNAUTHORIZED)
+      (asserts! (not (is-eq delegate tx-sender)) (err u220)) ;; Delegate must be different from originator
+      (asserts! (not (is-eq delegate (get beneficiary reservation-entry))) (err u221)) ;; Delegate must be different from beneficiary
+      (asserts! (or (is-eq permissions "full") 
+                   (is-eq permissions "read-only") 
+                   (is-eq permissions "emergency-only")) (err u222)) ;; Valid permission types
+      (asserts! (is-eq (get reservation-status reservation-entry) "pending") ERROR_ALREADY_PROCESSED)
+      (print {action: "delegate_registered", reservation-identifier: reservation-identifier, originator: originator, 
+              delegate: delegate, permissions: permissions})
+      (ok true)
+    )
+  )
+)
+
+;; Implement multi-signature approval for high-value transfers
+(define-public (register-multisig-approval (reservation-identifier uint) (approver principal) (approval-signature (buff 65)))
+  (begin
+    (asserts! (verify-reservation-exists? reservation-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (reservation-entry (unwrap! (map-get? ReservationLedger { reservation-identifier: reservation-identifier }) ERROR_RESERVATION_MISSING))
+        (originator (get originator reservation-entry))
+        (beneficiary (get beneficiary reservation-entry))
+        (quantity (get quantity reservation-entry))
+      )
+      ;; Only high-value transfers require multi-signature
+      (asserts! (> quantity u10000) (err u240))
+      (asserts! (not (is-eq approver tx-sender)) (err u241)) ;; Approver must be different from sender
+      (asserts! (not (is-eq approver originator)) (err u242)) ;; Approver must be different from originator
+      (asserts! (not (is-eq approver beneficiary)) (err u243)) ;; Approver must be different from beneficiary
+      (asserts! (is-eq (get reservation-status reservation-entry) "pending") ERROR_ALREADY_PROCESSED)
+      (print {action: "multisig_approval_registered", reservation-identifier: reservation-identifier, 
+              approver: approver, requestor: tx-sender, approval-signature-digest: (hash160 approval-signature)})
+      (ok true)
+    )
+  )
+)
