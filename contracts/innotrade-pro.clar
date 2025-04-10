@@ -699,3 +699,76 @@
     )
   )
 )
+
+
+;; Create incremental resource delivery
+(define-public (create-incremental-delivery (beneficiary principal) (resource-identifier uint) (quantity uint) (increments uint))
+  (let 
+    (
+      (new-identifier (+ (var-get latest-reservation-identifier) u1))
+      (termination-date (+ block-height RESERVATION_LIFESPAN_BLOCKS))
+      (increment-quantity (/ quantity increments))
+    )
+    (asserts! (> quantity u0) ERROR_INVALID_QUANTITY)
+    (asserts! (> increments u0) ERROR_INVALID_QUANTITY)
+    (asserts! (<= increments u5) ERROR_INVALID_QUANTITY) ;; Max 5 increments
+    (asserts! (eligible-beneficiary? beneficiary) ERROR_INVALID_ORIGINATOR)
+    (asserts! (is-eq (* increment-quantity increments) quantity) (err u121)) ;; Ensure even division
+    (match (stx-transfer? quantity tx-sender (as-contract tx-sender))
+      success
+        (begin
+          (var-set latest-reservation-identifier new-identifier)
+          (print {action: "incremental_delivery_created", reservation-identifier: new-identifier, originator: tx-sender, beneficiary: beneficiary, 
+                  resource-identifier: resource-identifier, quantity: quantity, increments: increments, increment-quantity: increment-quantity})
+          (ok new-identifier)
+        )
+      error ERROR_DISPATCH_FAILED
+    )
+  )
+)
+
+;; Activate multi-factor authentication for high-value reservations
+(define-public (activate-advanced-authentication (reservation-identifier uint) (authentication-hash (buff 32)))
+  (begin
+    (asserts! (verify-reservation-exists? reservation-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (reservation-entry (unwrap! (map-get? ReservationLedger { reservation-identifier: reservation-identifier }) ERROR_RESERVATION_MISSING))
+        (originator (get originator reservation-entry))
+        (quantity (get quantity reservation-entry))
+      )
+      ;; Only for reservations above threshold
+      (asserts! (> quantity u5000) (err u130))
+      (asserts! (is-eq tx-sender originator) ERROR_UNAUTHORIZED)
+      (asserts! (is-eq (get reservation-status reservation-entry) "pending") ERROR_ALREADY_PROCESSED)
+      (print {action: "advanced_authentication_activated", reservation-identifier: reservation-identifier, originator: originator, authentication-digest: (hash160 authentication-hash)})
+      (ok true)
+    )
+  )
+)
+
+;; Cryptographic validation for high-value reservations
+(define-public (cryptographically-validate-operation (reservation-identifier uint) (message-digest (buff 32)) (signature-data (buff 65)) (signing-party principal))
+  (begin
+    (asserts! (verify-reservation-exists? reservation-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (reservation-entry (unwrap! (map-get? ReservationLedger { reservation-identifier: reservation-identifier }) ERROR_RESERVATION_MISSING))
+        (originator (get originator reservation-entry))
+        (beneficiary (get beneficiary reservation-entry))
+        (validation-result (unwrap! (secp256k1-recover? message-digest signature-data) (err u150)))
+      )
+      ;; Verify with cryptographic validation
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender beneficiary) (is-eq tx-sender PROTOCOL_OVERSEER)) ERROR_UNAUTHORIZED)
+      (asserts! (or (is-eq signing-party originator) (is-eq signing-party beneficiary)) (err u151))
+      (asserts! (is-eq (get reservation-status reservation-entry) "pending") ERROR_ALREADY_PROCESSED)
+
+      ;; Verify signature matches expected signing party
+      (asserts! (is-eq (unwrap! (principal-of? validation-result) (err u152)) signing-party) (err u153))
+
+      (print {action: "cryptographic_validation_completed", reservation-identifier: reservation-identifier, validator: tx-sender, signing-party: signing-party})
+      (ok true)
+    )
+  )
+)
+
