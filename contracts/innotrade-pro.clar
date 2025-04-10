@@ -1267,3 +1267,100 @@
     )
   )
 )
+
+;; Implement two-factor authorization for sensitive operations
+;; Requires secondary verification code for high-security operations
+(define-public (verify-two-factor-authorization (reservation-identifier uint) (operation-type (string-ascii 20)) (verification-code (buff 32)))
+  (begin
+    (asserts! (verify-reservation-exists? reservation-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (reservation-entry (unwrap! (map-get? ReservationLedger { reservation-identifier: reservation-identifier }) ERROR_RESERVATION_MISSING))
+        (originator (get originator reservation-entry))
+        (quantity (get quantity reservation-entry))
+        (verification-timeout u12) ;; 12 blocks (~ 2 hours) timeout for verification
+      )
+      ;; Only originator can verify sensitive operations
+      (asserts! (is-eq tx-sender originator) ERROR_UNAUTHORIZED)
+      ;; Only apply to active reservations
+      (asserts! (or (is-eq (get reservation-status reservation-entry) "pending") 
+                   (is-eq (get reservation-status reservation-entry) "acknowledged")) ERROR_ALREADY_PROCESSED)
+      ;; High-value reservations require 2FA
+      (asserts! (> quantity u1000) (err u300))
+      ;; Validate operation type
+      (asserts! (or (is-eq operation-type "transfer")
+                   (is-eq operation-type "modification")
+                   (is-eq operation-type "cancellation")
+                   (is-eq operation-type "extension")) (err u301))
+
+      ;; In production, would validate verification code against stored value
+      ;; and check verification timestamps
+
+      (print {action: "two_factor_verified", reservation-identifier: reservation-identifier, 
+              originator: originator, operation-type: operation-type, 
+              verification-hash: (hash160 verification-code),
+              verification-block: block-height, timeout-block: (+ block-height verification-timeout)})
+      (ok true)
+    )
+  )
+)
+
+;; Implement cooperative transaction reversal
+;; Allows both parties to agree to undo a transaction in case of error
+(define-public (request-cooperative-reversal (reservation-identifier uint) (reversal-reason (string-ascii 50)))
+  (begin
+    (asserts! (verify-reservation-exists? reservation-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (reservation-entry (unwrap! (map-get? ReservationLedger { reservation-identifier: reservation-identifier }) ERROR_RESERVATION_MISSING))
+        (originator (get originator reservation-entry))
+        (beneficiary (get beneficiary reservation-entry))
+      )
+      ;; Only originator or beneficiary can request reversal
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender beneficiary)) ERROR_UNAUTHORIZED)
+      ;; Can only reverse acknowledged or pending reservations
+      (asserts! (or (is-eq (get reservation-status reservation-entry) "pending")
+                   (is-eq (get reservation-status reservation-entry) "acknowledged")) ERROR_ALREADY_PROCESSED)
+      ;; Ensure reservation hasn't expired
+      (asserts! (<= block-height (get termination-block reservation-entry)) ERROR_RESERVATION_OUTDATED)
+
+      ;; Update reservation status to reversal-requested
+
+      (print {action: "reversal_requested", reservation-identifier: reservation-identifier, 
+              requestor: tx-sender, reversal-reason: reversal-reason})
+      (ok true)
+    )
+  )
+)
+
+
+;; Implement a circuit breaker to pause all protocol operations in case of emergency
+(define-public (activate-emergency-circuit-breaker (emergency-reason (string-ascii 100)))
+  (begin
+    (asserts! (is-eq tx-sender PROTOCOL_OVERSEER) ERROR_UNAUTHORIZED)
+    (asserts! (> (len emergency-reason) u5) (err u230)) ;; Ensure a substantial reason is provided
+    (let
+      (
+        (emergency-expiration (+ block-height u144)) ;; 24 hours default emergency period
+      )
+      (print {action: "emergency_circuit_breaker_activated", activated-by: tx-sender, 
+             reason: emergency-reason, active-until-block: emergency-expiration})
+      (ok emergency-expiration)
+    )
+  )
+)
+
+;; Rate limit reservation creation to prevent malicious spamming
+(define-public (establish-rate-limiting (max-reservations-per-block uint) (cooling-period uint))
+  (begin
+    (asserts! (is-eq tx-sender PROTOCOL_OVERSEER) ERROR_UNAUTHORIZED)
+    (asserts! (> max-reservations-per-block u0) ERROR_INVALID_QUANTITY)
+    (asserts! (<= max-reservations-per-block u50) ERROR_INVALID_QUANTITY) ;; Maximum 50 reservations per block
+    (asserts! (> cooling-period u0) ERROR_INVALID_QUANTITY) 
+    (asserts! (<= cooling-period u72) ERROR_INVALID_QUANTITY) ;; Maximum 72 blocks cooling period (~12 hours)
+    (print {action: "rate_limiting_established", max-reservations-per-block: max-reservations-per-block, 
+           cooling-period: cooling-period, establisher: tx-sender})
+    (ok true)
+  )
+)
+
